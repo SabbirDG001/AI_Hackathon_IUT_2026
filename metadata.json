@@ -1,0 +1,6 @@
+{
+  "name": "Lights, Fans, Discord Dashboard",
+  "description": "Real-time dashboard for office device status, energy usage, and active alerts with Discord integration simulation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
