@@ -5,6 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
+import { Client as DiscordClient, GatewayIntentBits, EmbedBuilder } from "discord.js";
 import { 
   Device, 
   Alert, 
@@ -24,6 +25,7 @@ const __dirname = path.dirname(__filename);
 
 // Initialize Gemini Client Lazily if key is present
 let ai: GoogleGenAI | null = null;
+let globalDiscordClient: DiscordClient | null = null;
 function getGeminiClient(): GoogleGenAI | null {
   if (!ai && process.env.GEMINI_API_KEY) {
     try {
@@ -430,6 +432,63 @@ async function startServer() {
     return device;
   }
 
+  // Send alert to Discord Webhook and Discord Bot Client
+  async function sendDiscordWebhookAlert(alert: Alert) {
+    // 1. Send to Webhook if configured
+    if (process.env.DISCORD_WEBHOOK_URL) {
+      try {
+        const emoji = alert.type === "after-hours" ? "⚠️" : "🚨";
+        const payload = {
+          embeds: [{
+            title: `${emoji} Smart Office Security Alert`,
+            description: alert.message,
+            color: alert.type === "after-hours" ? 16711680 : 16753920, // Red for after-hours, orange for continuous-on
+            fields: [
+              { name: "Room", value: alert.room, inline: true },
+              { name: "Device", value: alert.deviceName || "Unknown", inline: true },
+              { name: "Status", value: alert.status, inline: true }
+            ],
+            timestamp: alert.triggeredAt
+          }]
+        };
+
+        await fetch(process.env.DISCORD_WEBHOOK_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        console.log(`Discord Webhook alert sent for: ${alert.title}`);
+      } catch (err) {
+        console.error("Failed to send Discord webhook alert:", err);
+      }
+    }
+
+    // 2. Send to Bot Client if logged in and DISCORD_CHANNEL_ID is set
+    if (globalDiscordClient && process.env.DISCORD_CHANNEL_ID) {
+      try {
+        const channel = await globalDiscordClient.channels.fetch(process.env.DISCORD_CHANNEL_ID);
+        if (channel && channel.isTextBased()) {
+          const emoji = alert.type === "after-hours" ? "⚠️" : "🚨";
+          const embed = new EmbedBuilder()
+            .setTitle(`${emoji} Smart Office Security Alert`)
+            .setDescription(alert.message)
+            .setColor(alert.type === "after-hours" ? 0xFF0000 : 0xFFA500)
+            .addFields(
+              { name: "Room", value: alert.room, inline: true },
+              { name: "Device", value: alert.deviceName || "Unknown", inline: true },
+              { name: "Status", value: alert.status, inline: true }
+            )
+            .setTimestamp(new Date(alert.triggeredAt));
+
+          await (channel as any).send({ embeds: [embed] });
+          console.log(`Direct Discord Bot Channel alert sent to channel ${process.env.DISCORD_CHANNEL_ID} for: ${alert.title}`);
+        }
+      } catch (err) {
+        console.error("Failed to send direct Discord channel alert:", err);
+      }
+    }
+  }
+
   // Evaluate Rules and Manage Alerts
   function evaluateAlerts() {
     const currentHour = simulation.simulatedHour;
@@ -458,6 +517,7 @@ async function startServer() {
             };
             alerts.unshift(newAlert); // add to top
             broadcast({ type: "ALERT_TRIGGER", alert: newAlert });
+            sendDiscordWebhookAlert(newAlert);
           }
         }
       });
@@ -507,6 +567,7 @@ async function startServer() {
             };
             alerts.unshift(newAlert);
             broadcast({ type: "ALERT_TRIGGER", alert: newAlert });
+            sendDiscordWebhookAlert(newAlert);
           }
         }
       }
@@ -683,6 +744,7 @@ async function startServer() {
 
       alerts.unshift(forcedAlert);
       broadcast({ type: "ALERT_TRIGGER", alert: forcedAlert, simulation });
+      sendDiscordWebhookAlert(forcedAlert);
       res.json({ success: true, alert: forcedAlert });
     } else if (type === "continuous-on") {
       // Find a device, turn it on, and force its onSince to be 3 hours ago
@@ -710,6 +772,7 @@ async function startServer() {
 
       alerts.unshift(forcedAlert);
       broadcast({ type: "ALERT_TRIGGER", alert: forcedAlert });
+      sendDiscordWebhookAlert(forcedAlert);
       res.json({ success: true, alert: forcedAlert });
     } else {
       res.status(400).json({ error: "Invalid alert type" });
@@ -1001,6 +1064,159 @@ async function startServer() {
     };
     res.json(finalResponse);
   });
+
+  // Built-in Live Discord Bot Client Integration
+  function startDiscordBot() {
+    const token = process.env.DISCORD_TOKEN;
+    if (!token) {
+      console.log("ℹ️ [Discord Bot] DISCORD_TOKEN is not configured. Built-in bot is sleeping.");
+      return;
+    }
+
+    try {
+      const client = new DiscordClient({
+        intents: [
+          GatewayIntentBits.Guilds,
+          GatewayIntentBits.GuildMessages,
+          GatewayIntentBits.MessageContent
+        ]
+      });
+
+      client.once("ready", () => {
+        console.log(`========================================`);
+        console.log(`🤖 Live Discord Bot logged in as: ${client.user?.tag}`);
+        console.log(`========================================`);
+      });
+
+      client.on("messageCreate", async (message: any) => {
+        if (message.author.bot) return;
+
+        const content = message.content.trim();
+        if (!content.startsWith("!")) return;
+
+        const parts = content.split(/\s+/);
+        const commandWithExcl = parts[0].toLowerCase();
+        const command = commandWithExcl.substring(1); // strip the '!'
+        const input = parts.slice(1).join(" ");
+
+        if (command === "status" || command === "room" || command === "usage") {
+          try {
+            await message.channel.sendTyping();
+          } catch (e) {}
+
+          // 1. Compute current hard details (same logic as /api/discord/command)
+          let factPayload = "";
+          let systemPrompt = "";
+
+          if (command === "status") {
+            const activeCount = devices.filter(d => d.status === "on").length;
+            const totalCount = devices.length;
+            const liveDraw = devices.reduce((sum, d) => sum + (d.status === "on" ? d.ratedWatts : 0), 0);
+            const activeAlerts = alerts.filter(a => a.status === "active").length;
+
+            factPayload = `Current office status: ${activeCount}/${totalCount} devices are ON. Current total load: ${liveDraw} Watts. There are ${activeAlerts} active system alerts.`;
+            systemPrompt = "You are an intelligent office assistant Discord bot. Summarize the overall office device status based on this data: " + factPayload + ". Keep it extremely friendly, concise, humanized, and formatted with simple Discord markdown. Be witty and helpful!";
+          } else if (command === "room") {
+            let matchRoom = "Drawing Room";
+            const cleanInput = input.toLowerCase();
+            if (cleanInput.includes("work 1") || cleanInput.includes("wr1") || cleanInput.includes("workroom 1") || cleanInput.includes("work1")) {
+              matchRoom = "Work Room 1";
+            } else if (cleanInput.includes("work 2") || cleanInput.includes("wr2") || cleanInput.includes("workroom 2") || cleanInput.includes("work2")) {
+              matchRoom = "Work Room 2";
+            } else if (cleanInput.includes("draw") || cleanInput.includes("dr") || cleanInput.includes("drawing")) {
+              matchRoom = "Drawing Room";
+            } else {
+              const inputLower = cleanInput.toLowerCase();
+              if (inputLower.includes("drawing")) matchRoom = "Drawing Room";
+              else if (inputLower.includes("work 1") || inputLower.includes("work1")) matchRoom = "Work Room 1";
+              else if (inputLower.includes("work 2") || inputLower.includes("work2")) matchRoom = "Work Room 2";
+            }
+
+            const roomDevices = devices.filter(d => d.room === matchRoom);
+            const active = roomDevices.filter(d => d.status === "on");
+            const totalPower = active.reduce((sum, d) => sum + d.ratedWatts, 0);
+
+            factPayload = `Room: ${matchRoom}. Total devices: ${roomDevices.length}. Devices ON: ${active.length}. Active Devices list: [${active.map(a => `${a.name} (${a.ratedWatts}W)`).join(", ")}]. Live Power draw: ${totalPower} Watts.`;
+            systemPrompt = `You are a smart Discord bot. Review this room state: ${factPayload}. Format a conversational, elegant summary for the team. Mention if everything is off or if there is high power draw. Keep it under 3-4 lines and very engaging.`;
+          } else if (command === "usage") {
+            const totalKwh = Math.round(energyTodayKwh * 100) / 100;
+            const currentStats = calculateStats();
+            const currentHour = simulation.simulatedHour;
+            const isWorkingHours = currentHour >= simulation.officeHoursStart && currentHour < simulation.officeHoursEnd;
+
+            factPayload = `Energy consumed today: ${totalKwh} kWh. Current live power draw: ${currentStats.livePower} Watts. Working hours status: ${isWorkingHours ? "Active (9am-5pm)" : "Inactive"}. Total active devices right now: ${currentStats.activeDevices}.`;
+            systemPrompt = `You are a Smart Energy advisor Discord bot. Analyze this energy report: ${factPayload}. Summarize today's performance, giving a warm tip about saving electricity or commenting on current load. Keep it brief, motivational, and conversational!`;
+          }
+
+          // Try to generate Gemini response
+          let replyText = "";
+          const gemini = getGeminiClient();
+          if (gemini) {
+            try {
+              const aiResponse = await gemini.models.generateContent({
+                model: "gemini-3.5-flash",
+                contents: systemPrompt,
+                config: {
+                  temperature: 0.7,
+                  systemInstruction: "You are the automated Discord Integration for a smart office dashboard called 'Lights, Fans, Discord'. Speak with a helpful, friendly, and slight geeky persona. Always reference the correct real data values provided. Return clean Discord markdown."
+                }
+              });
+              if (aiResponse.text) {
+                replyText = `🤖 **[Discord Bot Live (AI-Generated)]**\n\n${aiResponse.text.trim()}`;
+              }
+            } catch (err) {
+              console.error("Gemini failed in Discord client, falling back:", err);
+            }
+          }
+
+          if (!replyText) {
+            // Use template fallback
+            const nowStr = formatSimTime(simulation.simulatedHour, simulation.simulatedMinute);
+            if (command === "status") {
+              const activeCount = devices.filter(d => d.status === "on").length;
+              const totalCount = devices.length;
+              const liveDraw = devices.reduce((sum, d) => sum + (d.status === "on" ? d.ratedWatts : 0), 0);
+              const activeAlerts = alerts.filter(a => a.status === "active").length;
+              replyText = `🤖 **Smart Office Bot (Fallback)**\n👋 Here is the current status as of **${nowStr}**:\n• **Devices On:** \`${activeCount}/${totalCount}\`\n• **Power Draw:** \`${liveDraw}W\`\n• **Alerts:** \`${activeAlerts}\` active.`;
+            } else if (command === "room") {
+              let matchRoom = "Drawing Room";
+              const cleanInput = input.toLowerCase();
+              if (cleanInput.includes("work 1") || cleanInput.includes("wr1") || cleanInput.includes("workroom 1") || cleanInput.includes("work1")) {
+                matchRoom = "Work Room 1";
+              } else if (cleanInput.includes("work 2") || cleanInput.includes("wr2") || cleanInput.includes("workroom 2") || cleanInput.includes("work2")) {
+                matchRoom = "Work Room 2";
+              }
+              const roomDevices = devices.filter(d => d.room === matchRoom);
+              const active = roomDevices.filter(d => d.status === "on");
+              const totalPower = active.reduce((sum, d) => sum + d.ratedWatts, 0);
+              replyText = `🤖 **Room Status: ${matchRoom}** (${nowStr})\n• **Active:** \`${active.length}/${roomDevices.length}\`\n• **Power:** \`${totalPower}W\`\n• **Devices Running:** ${active.map(a => `\`${a.name}\``).join(", ") || "_None_"}`;
+            } else if (command === "usage") {
+              const totalKwh = Math.round(energyTodayKwh * 100) / 100;
+              const currentStats = calculateStats();
+              replyText = `🤖 **Power Consumption Stats** (${nowStr})\n• **Today's Total:** \`${totalKwh} kWh\`\n• **Real-Time Load:** \`${currentStats.livePower}W\`\n• **Estimated cost:** \`৳ ${(totalKwh * 8).toFixed(2)}\``;
+            }
+          }
+
+          try {
+            await message.reply(replyText);
+          } catch (replyErr) {
+            console.error("Failed to reply to message:", replyErr);
+          }
+        }
+      });
+
+      globalDiscordClient = client;
+
+      client.login(token).catch((err: any) => {
+        console.error("❌ [Discord Bot] Failed to login to Discord Bot client:", err.message);
+      });
+    } catch (err) {
+      console.error("❌ [Discord Bot] Error starting Discord Bot client:", err);
+    }
+  }
+
+  // Start the Discord Bot client in the background
+  startDiscordBot();
 
   // Vite Integration for Client Files
   if (process.env.NODE_ENV !== "production") {

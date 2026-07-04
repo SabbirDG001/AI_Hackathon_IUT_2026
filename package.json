@@ -19,6 +19,7 @@
     "@vitejs/plugin-react": "^5.0.4",
     "autoprefixer": "^10.4.21",
     "chart.js": "^4.5.1",
+    "discord.js": "^14.26.4",
     "dotenv": "^17.2.3",
     "esbuild": "^0.25.0",
     "express": "^4.21.2",
@@ -31,6 +32,5 @@
     "typescript": "~5.8.2",
     "vite": "^6.2.3",
     "ws": "^8.21.0"
-  },
-  "devDependencies": {}
+  }
 }
