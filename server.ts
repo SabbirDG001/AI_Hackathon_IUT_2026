@@ -17,7 +17,9 @@ import {
 } from "./src/types.js";
 
 // Setup __dirname for ES Modules
-const __filename = fileURLToPath(import.meta.url);
+const __filename = typeof import.meta !== "undefined" && import.meta.url
+  ? fileURLToPath(import.meta.url)
+  : path.join(process.cwd(), "server.ts");
 const __dirname = path.dirname(__filename);
 
 // Initialize Gemini Client Lazily if key is present
@@ -1019,7 +1021,7 @@ async function startServer() {
   }
 
   // PORT bindings on 0.0.0.0 as required by the reverse proxy
-  const PORT = 3000;
+  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
   server.listen(PORT, "0.0.0.0", () => {
     console.log(`========================================`);
     console.log(`🚀 Smart Office Dashboard running at http://0.0.0.0:${PORT}`);
