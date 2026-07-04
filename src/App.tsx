@@ -79,7 +79,7 @@ export default function App() {
   const [selectedType, setSelectedType] = useState<string>("All");
   const [selectedStatus, setSelectedStatus] = useState<string>("All");
   const [layoutMode, setLayoutMode] = useState<"grid" | "floorplan">("grid");
-  const [historyFilter, setHistoryFilter] = useState<"off" | "all">("off");
+  const [historyFilter, setHistoryFilter] = useState<"all" | "on" | "off">("all");
   const [wsStatus, setWsStatus] = useState<"connecting" | "connected" | "disconnected">("connecting");
   const [currentDatasetId, setCurrentDatasetId] = useState<string>("iut-hq");
   const [currentDatasetIndex, setCurrentDatasetIndex] = useState<number>(0);
@@ -366,8 +366,9 @@ export default function App() {
 
   // Filtered Toggle History (Fans & Lights only)
   const filteredToggleHistory = toggleHistory
+    .filter(event => event.deviceId !== "sys")
     .filter(event => event.deviceType === "fan" || event.deviceType === "light")
-    .filter(event => historyFilter === "all" || event.action === "off");
+    .filter(event => historyFilter === "all" || event.action === historyFilter);
 
   return (
     <div className="min-h-screen bg-[#090A0D] text-[#E2E8F0] select-none selection:bg-blue-500/20 flex flex-col font-sans">
@@ -1011,111 +1012,118 @@ export default function App() {
                 </div>
                 <div>
                   <h3 className="font-sans font-bold text-sm text-[#E2E8F0] uppercase tracking-wider">Device Switch History & Operation Logs</h3>
-                  <p className="text-[10px] text-slate-500 mt-0.5">Real-time table of all appliances showing exact status, run timings, and accumulated consumption.</p>
+                  <p className="text-[10px] text-slate-500 mt-0.5">Real-time scrolling log of all appliances showing exact state transitions, timing, and wattage footprint.</p>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="flex items-center gap-1 bg-[#1E293B]/60 p-1 rounded border border-[#334155]/60">
+                  <span className="font-mono text-[8px] text-slate-500 uppercase tracking-wider px-1">Filter Logs:</span>
+                  {(["all", "on", "off"] as const).map((filterVal) => (
+                    <button
+                      key={filterVal}
+                      onClick={() => setHistoryFilter(filterVal)}
+                      className={`px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase transition-all cursor-pointer ${
+                        historyFilter === filterVal
+                          ? "bg-blue-600 text-white"
+                          : "text-slate-400 hover:text-[#E2E8F0]"
+                      }`}
+                    >
+                      {filterVal}
+                    </button>
+                  ))}
+                </div>
                 <span className="font-mono text-[9px] text-emerald-400 bg-emerald-950/20 border border-emerald-500/30 px-2 py-1 rounded font-bold uppercase tracking-wider animate-pulse-slow">
                   Active Load: {devices.filter(d => d.status === "on").length} / {devices.length} Devices On
                 </span>
               </div>
             </div>
 
-            {/* Live table as requested by the user */}
-            <div className="overflow-x-auto w-full rounded-lg border border-[#1E293B] bg-[#0F1115]/30" id="device-history-table">
+            {/* Live scrolling history log as requested by the user */}
+            <div className="overflow-x-auto w-full rounded-lg border border-[#1E293B] bg-[#0F1115]/30 max-h-[480px] overflow-y-auto" id="device-history-table">
               <table className="w-full text-left border-collapse font-sans min-w-[700px]">
                 <thead>
                   <tr className="border-b border-[#1E293B] bg-[#0F1115] text-[10px] font-mono text-slate-400 uppercase tracking-wider sticky top-0">
+                    <th className="py-3 px-4">Log Index</th>
                     <th className="py-3 px-4">Device (Fan or Light)</th>
                     <th className="py-3 px-4">Location</th>
-                    <th className="py-3 px-4">On Time</th>
-                    <th className="py-3 px-4">Off Time</th>
-                    <th className="py-3 px-4">Total Usage Watt</th>
-                    <th className="py-3 px-4 text-right">Current Status</th>
+                    <th className="py-3 px-4">Operation Event</th>
+                    <th className="py-3 px-4">Device Power</th>
+                    <th className="py-3 px-4 text-right">Logged Time</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#1E293B]/60 text-[11px] text-slate-300">
-                  {devices.map(d => {
-                    const isActive = d.status === "on";
-                    const isFan = d.type === "fan";
-                    
-                    // Format onSince
-                    const onTimeStr = d.onSince 
-                      ? new Date(d.onSince).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
-                      : "—";
+                  {filteredToggleHistory.length > 0 ? (
+                    filteredToggleHistory.map((event, index) => {
+                      const isOn = event.action === "on";
+                      const isFan = event.deviceType === "fan";
+                      const deviceWattage = devices.find(dev => dev.id === event.deviceId)?.ratedWatts || (isFan ? 45 : 9);
+                      
+                      // Format event timestamp nicely
+                      const dateObj = new Date(event.timestamp);
+                      const formattedTime = dateObj.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+                      const formattedDate = dateObj.toLocaleDateString([], { month: "short", day: "numeric" });
 
-                    // Format lastOff
-                    const offTimeStr = d.lastOff
-                      ? new Date(d.lastOff).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
-                      : isActive 
-                        ? "Active Now" 
-                        : "—";
-
-                    return (
-                      <tr 
-                        key={d.id} 
-                        id={`device-row-${d.id}`}
-                        className={`hover:bg-[#1E293B]/30 transition-colors ${
-                          isActive ? "bg-emerald-500/[0.02]" : "bg-transparent"
-                        }`}
-                      >
-                        <td className="py-3 px-4 font-semibold text-slate-200">
-                          <div className="flex items-center gap-2.5">
-                            <div className={`p-1.5 rounded-lg border shrink-0 ${
-                              isActive 
-                                ? "bg-emerald-950/20 border-emerald-500/30 text-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.1)]" 
-                                : "bg-slate-950/40 border-slate-800 text-slate-500"
+                      return (
+                        <tr 
+                          key={event.id} 
+                          id={`history-row-${event.id}`}
+                          className={`hover:bg-[#1E293B]/30 transition-colors ${
+                            isOn ? "bg-emerald-500/[0.01]" : "bg-red-500/[0.01]"
+                          }`}
+                        >
+                          <td className="py-3 px-4 font-mono text-slate-500">
+                            #{filteredToggleHistory.length - index}
+                          </td>
+                          <td className="py-3 px-4 font-semibold text-slate-200">
+                            <div className="flex items-center gap-2.5">
+                              <div className={`p-1.5 rounded-lg border shrink-0 ${
+                                isOn 
+                                  ? "bg-emerald-950/20 border-emerald-500/30 text-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.1)]" 
+                                  : "bg-slate-950/40 border-slate-800 text-slate-500"
+                              }`}>
+                                {isFan ? (
+                                  <Fan className={`w-3.5 h-3.5 ${isOn ? "animate-spin" : ""}`} style={{ animationDuration: "3s" }} />
+                                ) : (
+                                  <Lightbulb className="w-3.5 h-3.5" />
+                                )}
+                              </div>
+                              <div className="flex flex-col">
+                                <span className="font-sans text-xs text-slate-200">{event.deviceName}</span>
+                                <span className="font-mono text-[9px] text-slate-500 uppercase tracking-wider">{event.deviceType}</span>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 text-slate-400 font-medium">
+                            {event.room}
+                          </td>
+                          <td className="py-3 px-4">
+                            <span className={`inline-flex items-center px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase tracking-wider border ${
+                              isOn
+                                ? "bg-emerald-950/25 border-emerald-500/30 text-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.15)]"
+                                : "bg-red-950/25 border-red-500/30 text-red-400 shadow-[0_0_8px_rgba(239,68,68,0.15)]"
                             }`}>
-                              {isFan ? (
-                                <Fan className={`w-3.5 h-3.5 ${isActive ? "animate-spin" : ""}`} style={{ animationDuration: "3s" }} />
-                              ) : (
-                                <Lightbulb className="w-3.5 h-3.5" />
-                              )}
+                              {isOn ? "SWITCHED ON" : "SWITCHED OFF"}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 font-mono text-slate-300 font-bold">
+                            {deviceWattage} W
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono text-slate-400">
+                            <div className="flex flex-col items-end">
+                              <span className="text-slate-200 font-medium">{formattedTime}</span>
+                              <span className="text-[9px] text-slate-500">{formattedDate}</span>
                             </div>
-                            <div className="flex flex-col">
-                              <span className="font-sans text-xs text-slate-200">{d.name}</span>
-                              <span className="font-mono text-[9px] text-slate-500 uppercase tracking-wider">{d.type}</span>
-                            </div>
-                          </div>
-                        </td>
-                        <td className="py-3 px-4 text-slate-400 font-medium">
-                          {d.room}
-                        </td>
-                        <td className="py-3 px-4 font-mono text-slate-400">
-                          {isActive ? (
-                            <div className="flex items-center gap-1 text-emerald-400 font-medium">
-                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                              <span>{onTimeStr}</span>
-                            </div>
-                          ) : (
-                            <span>{onTimeStr}</span>
-                          )}
-                        </td>
-                        <td className="py-3 px-4 font-mono">
-                          {isActive ? (
-                            <span className="text-emerald-400/80 font-bold uppercase tracking-wide text-[9px]">Active Now</span>
-                          ) : (
-                            <span className="text-slate-500">{offTimeStr}</span>
-                          )}
-                        </td>
-                        <td className="py-3 px-4">
-                          <div className="flex flex-col">
-                            <span className="font-mono font-bold text-slate-200 text-xs">{d.ratedWatts} W</span>
-                            <span className="font-mono text-[9px] text-blue-400">{(d.totalUsageWh || 0).toFixed(1)} Wh accumulated</span>
-                          </div>
-                        </td>
-                        <td className="py-3 px-4 text-right">
-                          <span className={`inline-flex items-center px-2 py-0.5 rounded text-[9px] font-mono font-bold uppercase tracking-wider border ${
-                            isActive
-                              ? "bg-emerald-950/25 border-emerald-500/30 text-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.15)]"
-                              : "bg-slate-900/40 border-slate-800/80 text-slate-500"
-                          }`}>
-                            {isActive ? "ON" : "OFF"}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  ) : (
+                    <tr>
+                      <td colSpan={6} className="py-12 text-center text-slate-500 italic">
+                        No switch operations captured. Toggle any fan or light to record history in real-time!
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
